@@ -1,102 +1,84 @@
-# bot_config.py
 import os
 import logging
 import discord
-from discord.ext import tasks, commands
+from discord.ext import commands, tasks
 from anime_scraper import AnimeScraper
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)7s] %(name)s: %(message)s")
 log = logging.getLogger("bot_config")
 
-# --- Discord Intents ---
 intents = discord.Intents.default()
-intents.message_content = True  # Required for reading messages
+intents.message_content = True
 
-# --- Bot Setup ---
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# --- Scraper ---
 scraper = AnimeScraper()
 
-# --- Config ---
 DISCORD_CHANNEL = os.getenv("DISCORD_CHANNEL") or os.getenv("DISCORD_CHANNEL_ID")
-if not DISCORD_CHANNEL:
-    log.error("❌ No channel ID set. Please add DISCORD_CHANNEL env var.")
-else:
-    log.info(f"📡 Sending updates to channel: {DISCORD_CHANNEL}")
 
-posted_episodes = set()  # memory cache so we don’t spam repeats
-
-
-# --- Bot Events ---
 @bot.event
 async def on_ready():
     log.info(f"✅ Bot logged in as {bot.user}")
-    check_new_episodes.start()
+    if DISCORD_CHANNEL:
+        log.info(f"📡 Sending updates to channel: {DISCORD_CHANNEL}")
+        check_new_episodes.start()
+    else:
+        log.error("❌ Channel not found — check DISCORD_CHANNEL env var")
 
-
-# --- Background Task ---
-@tasks.loop(minutes=5.0)  # check every 5 minutes
+@tasks.loop(minutes=10)
 async def check_new_episodes():
     channel = bot.get_channel(int(DISCORD_CHANNEL))
     if not channel:
-        log.error("❌ Channel not found — check DISCORD_CHANNEL env var")
+        log.error("❌ Target channel not found.")
         return
 
     episodes = scraper.fetch_episodes()
-    if not episodes:
-        log.warning("⚠️ No episodes scraped — possibly blocked or site down.")
-        return
-
-    new_eps = [ep for ep in episodes if ep["link"] not in posted_episodes]
-
-    for ep in new_eps:
+    for ep in episodes:
         embed = discord.Embed(
-            title=f"{ep['title']} - {ep['episode']}",
-            url=ep['link'],
-            description="🎬 New episode is available now!",
-            color=discord.Color.purple(),
+            title=f"{ep['anime']} — {ep['episode']}",
+            url=ep["link"],
+            description=f"New episode released: **{ep['episode']}**",
+            color=discord.Color.blue()
         )
         if ep["image"]:
             embed.set_thumbnail(url=ep["image"])
-
         await channel.send(embed=embed)
-        posted_episodes.add(ep["link"])
+        log.info(f"📢 Posted: {ep['anime']} {ep['episode']}")
 
-        log.info(f"📢 Posted: {ep['title']} {ep['episode']}")
-
-
-# --- Commands ---
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("🏓 Pong! I’m alive.")
-
+# 🔹 Commands
 @bot.command(name="latest")
 async def latest(ctx):
+    """Show latest 5 episodes from /episode/."""
     episodes = scraper.fetch_episodes()
     if not episodes:
-        await ctx.send("⚠️ Could not fetch episodes right now.")
+        await ctx.send("⚠️ No new episodes found.")
         return
-
-    for ep in episodes[:5]:  # show last 5
+    for ep in episodes[:5]:
         embed = discord.Embed(
-            title=f"{ep['title']} - {ep['episode']}",
-            url=ep['link'],
-            description="📺 Latest episode update",
-            color=discord.Color.green(),
+            title=f"{ep['anime']} — {ep['episode']}",
+            url=ep["link"],
+            color=discord.Color.green()
         )
         if ep["image"]:
             embed.set_thumbnail(url=ep["image"])
         await ctx.send(embed=embed)
 
-
-# --- Run ---
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    log.error("❌ DISCORD_TOKEN is missing in env vars")
-else:
-    bot.run(TOKEN)
+@bot.command(name="anime")
+async def anime(ctx, *, name: str):
+    """Search for episodes by anime name."""
+    episodes = scraper.fetch_episodes()
+    results = [ep for ep in episodes if name.lower() in ep["anime"].lower()]
+    if not results:
+        await ctx.send(f"⚠️ No episodes found for `{name}`")
+        return
+    for ep in results[:5]:
+        embed = discord.Embed(
+            title=f"{ep['anime']} — {ep['episode']}",
+            url=ep["link"],
+            color=discord.Color.purple()
+        )
+        if ep["image"]:
+            embed.set_thumbnail(url=ep["image"])
+        await ctx.send(embed=embed)
 
 
 
