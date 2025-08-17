@@ -1,110 +1,101 @@
-import requests
-import random
+import os
 import logging
+import random
 import time
+import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
 log = logging.getLogger("AnimeScraper")
 
 class AnimeScraper:
-    BASE_URL = "https://witanime.red/"
-
-    def __init__(self, max_retries=5, cooldown=2, max_results=5):
-        """
-        Anime scraper with proxy rotation & retry logic.
-        :param max_retries: how many times to retry before giving up
-        :param cooldown: seconds to wait between retries
-        :param max_results: maximum episodes to return each run
-        """
-        self.session = requests.Session()
-        self.max_retries = max_retries
-        self.cooldown = cooldown
-        self.max_results = max_results
-        self._last_posted = set()  # track already posted episodes
+    def __init__(self, url="https://witanime.red/"):
+        self.url = url
+        self.scraper = cloudscraper.create_scraper()  # Cloudflare bypass
+        self.proxies = []
+        self.max_retries = 5
+        self.timeout = 10
 
     def fetch_proxies(self):
-        """Fetch fresh proxies from Proxyscrape API"""
-        url = (
-            "https://api.proxyscrape.com/v3/free-proxy-list/get?"
-            "request=displayproxies&protocol=http&timeout=2000&country=all&ssl=all&anonymity=all"
-        )
+        """Fetch fresh proxies from proxyscrape API"""
         try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            proxies = resp.text.splitlines()
-            log.info(f"✅ Loaded {len(proxies)} proxies from Proxyscrape")
-            return proxies
+            resp = requests.get(
+                "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=1000&country=all&ssl=all&anonymity=all"
+            )
+            if resp.status_code == 200:
+                self.proxies = list(set(resp.text.splitlines()))
+                log.info(f"✅ Loaded {len(self.proxies)} proxies from Proxyscrape")
+            else:
+                log.warning("⚠️ Failed to fetch proxies, status %s", resp.status_code)
         except Exception as e:
-            log.error(f"❌ Failed to fetch proxies: {e}")
-            return []
+            log.error("❌ Error fetching proxies: %s", e)
 
-    def get_latest_episodes(self):
-        """Scrape latest episodes with retry, proxy rotation, deduplication & result cap"""
-        proxies = self.fetch_proxies()
-        episodes = []
+    def get(self, url):
+        """Try cloudscraper first, fallback to proxies if needed"""
+        headers = {
+            "User-Agent": random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
+            ])
+        }
+
+        # 1️⃣ Try cloudscraper
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                log.info(f"🌐 [Cloudscraper] Attempt {attempt}")
+                resp = self.scraper.get(url, headers=headers, timeout=self.timeout)
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                log.warning(f"❌ Cloudscraper attempt {attempt} failed: {e}")
+                time.sleep(2)
+
+        # 2️⃣ Fallback: try random proxies
+        if not self.proxies:
+            self.fetch_proxies()
 
         for attempt in range(1, self.max_retries + 1):
-            proxy = None
-            if proxies:
-                proxy = random.choice(proxies)
-                proxies.remove(proxy)
-                self.session.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-                log.info(f"🌐 Attempt {attempt}: Using proxy {proxy}")
-            else:
-                self.session.proxies = {}
-                log.info(f"🔄 Attempt {attempt}: Trying direct request")
-
+            if not self.proxies:
+                break
+            proxy = random.choice(self.proxies)
+            proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
             try:
-                headers = {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/115.0 Safari/537.36"
-                    )
-                }
-                resp = self.session.get(self.BASE_URL, headers=headers, timeout=10)
+                log.info(f"🌐 [Proxy] Attempt {attempt} with {proxy}")
+                resp = requests.get(url, headers=headers, proxies=proxies, timeout=self.timeout)
                 resp.raise_for_status()
-
-                soup = BeautifulSoup(resp.text, "html.parser")
-                cards = soup.select(".anime-card-container")
-
-                for card in cards:
-                    title_el = card.select_one(".anime-card-title h3 a")
-                    ep_el = card.select_one(".episodes-card-title h3 a")
-                    img_el = card.select_one("img")
-
-                    if title_el and ep_el and img_el:
-                        identifier = f"{title_el.text.strip()}-{ep_el.text.strip()}"
-                        if identifier in self._last_posted:
-                            continue  # skip already posted
-
-                        episodes.append({
-                            "title": title_el.text.strip(),
-                            "episode": ep_el.text.strip(),
-                            "link": ep_el["href"],
-                            "image": img_el["src"],
-                        })
-                        self._last_posted.add(identifier)
-
-                    # limit to avoid spamming Discord
-                    if len(episodes) >= self.max_results:
-                        break
-
-                if episodes:
-                    log.info(f"✅ Successfully scraped {len(episodes)} new episodes")
-                    return episodes
-                else:
-                    log.warning(f"⚠️ No new episodes found on attempt {attempt}")
-
+                return resp
             except Exception as e:
-                log.warning(f"❌ Attempt {attempt} failed: {e}")
-
-            time.sleep(self.cooldown)  # wait before retry
-
-        log.error("🚨 All retries failed.")
-        return []
+                log.warning(f"❌ Proxy attempt {attempt} with {proxy} failed: {e}")
+                time.sleep(2)
 
         log.error("🚨 All retries failed.")
-        return []
+        return None
+
+    def fetch_episodes(self):
+        """Scrape episodes from Witanime"""
+        resp = self.get(self.url)
+        if not resp:
+            log.error("❌ Could not fetch episodes at all.")
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        episodes = []
+        for card in soup.select(".anime-card-container"):
+            title_el = card.select_one(".anime-card-title h3 a")
+            episode_el = card.select_one(".episodes-card-title h3 a")
+            img_el = card.select_one("img")
+
+            if title_el and episode_el and img_el:
+                episodes.append({
+                    "title": title_el.text.strip(),
+                    "episode": episode_el.text.strip(),
+                    "url": episode_el["href"],
+                    "image": img_el["src"]
+                })
+
+        log.info(f"✅ Scraped {len(episodes)} episodes")
+        return episodes
+
 
 
