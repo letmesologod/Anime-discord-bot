@@ -1,4 +1,4 @@
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
 
@@ -6,21 +6,14 @@ class AnimeScraper:
     BASE_URL = "https://witanime.red/"
 
     def __init__(self):
-        # Fake browser headers to avoid 403 errors
-        self.headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/119.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+        # Create a cloudscraper session (acts like a browser)
+        self.scraper = cloudscraper.create_scraper(browser="chrome")
 
     def get_latest_episodes(self):
         """Scrape latest episodes from witanime.red"""
         episodes = []
         try:
-            response = requests.get(self.BASE_URL, headers=self.headers, timeout=10)
+            response = self.scraper.get(self.BASE_URL, timeout=15)
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -29,7 +22,6 @@ class AnimeScraper:
             cards = soup.select("div.anime-card-container")
 
             for card in cards:
-                # Episode info
                 ep_tag = card.select_one("div.episodes-card-title h3 a")
                 img_tag = card.select_one("img.img-responsive")
                 anime_tag = card.select_one("div.anime-card-title h3 a")
@@ -57,3 +49,4 @@ class AnimeScraper:
             print(f"[AnimeScraper] Error fetching episodes: {e}")
 
         return episodes
+
