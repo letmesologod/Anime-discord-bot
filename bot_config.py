@@ -1,63 +1,107 @@
-import discord
-from discord.ext import commands, tasks
-from anime_scraper import AnimeScraper
-import logging
 import os
+import logging
+import asyncio
+import discord
+from discord.ext import tasks, commands
+from anime_scraper import AnimeScraper
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ---------- Logging Setup ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("bot_config")
 
-# Discord bot setup
+# ---------- Config ----------
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # set in Koyeb secrets
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL", "0"))  # channel to post episodes
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))  # default 10 min
+
+# ---------- Bot Setup ----------
 intents = discord.Intents.default()
-intents.message_content = True
-
+intents.message_content = True  # needed for commands
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Scraper instance (with proxy + retry logic)
-scraper = AnimeScraper()
+# ---------- Scraper ----------
+scraper = AnimeScraper(max_retries=5, cooldown=2, max_results=5)
 
-# Load Discord channel ID from env variable
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))  # put your channel ID in Koyeb env vars
-
-@bot.event
-async def on_ready():
-    logger.info(f"✅ Bot logged in as {bot.user}")
-    check_new_episodes.start()
-
-@tasks.loop(minutes=10)
-async def check_new_episodes():
-    """Check for new anime episodes every 10 minutes and post in Discord."""
-    if CHANNEL_ID == 0:
-        logger.error("❌ DISCORD_CHANNEL_ID not set in environment variables.")
-        return
-
+# ---------- Background Task ----------
+@tasks.loop(seconds=CHECK_INTERVAL)
+async def fetch_and_post():
+    """Background task that fetches new episodes & posts to Discord"""
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
-        logger.error(f"❌ Channel with ID {CHANNEL_ID} not found.")
+        log.error("❌ Channel not found — check DISCORD_CHANNEL env var")
         return
 
     try:
         episodes = scraper.get_latest_episodes()
         if not episodes:
-            logger.warning("⚠️ No episodes scraped — possibly blocked or site down.")
+            await channel.send("⚠️ No new episodes found (possibly blocked or site down).")
+            log.warning("⚠️ No episodes scraped — possibly blocked or site down.")
             return
 
         for ep in episodes:
             embed = discord.Embed(
-                title=ep["title"],
+                title=f"{ep['title']} - {ep['episode']}",
                 url=ep["link"],
-                description=f"📺 New episode released: {ep['title']}",
-                color=discord.Color.blue()
+                description="New episode available 🎉",
+                color=discord.Color.blue(),
             )
-            if ep.get("image"):
-                embed.set_image(url=ep["image"])
-
+            embed.set_thumbnail(url=ep["image"])
+            embed.set_footer(text="Anime Notif Bot • Powered by Witanime")
             await channel.send(embed=embed)
-            logger.info(f"✅ Posted episode: {ep['title']}")
+            await asyncio.sleep(2)  # small delay to avoid spam
 
     except Exception as e:
-        logger.error(f"❌ Error fetching episodes: {e}")
+        log.error(f"🚨 Error in fetch_and_post: {e}", exc_info=True)
+        if channel:
+            await channel.send("🚨 Error while fetching episodes, check logs.")
+
+# ---------- Bot Events ----------
+@bot.event
+async def on_ready():
+    log.info(f"✅ Bot logged in as {bot.user}")
+    if not fetch_and_post.is_running():
+        fetch_and_post.start()
+
+@bot.command()
+async def ping(ctx):
+    """Simple healthcheck command"""
+    await ctx.send("🏓 Pong! Bot is alive.")
+
+@bot.command()
+async def latest(ctx, count: int = 3):
+    """Fetch latest X episodes immediately"""
+    try:
+        episodes = scraper.get_latest_episodes()
+        if not episodes:
+            await ctx.send("⚠️ No new episodes found.")
+            return
+
+        for ep in episodes[:count]:
+            embed = discord.Embed(
+                title=f"{ep['title']} - {ep['episode']}",
+                url=ep["link"],
+                description="Latest episode 🔎",
+                color=discord.Color.green(),
+            )
+            embed.set_thumbnail(url=ep["image"])
+            await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send("❌ Failed to fetch latest episodes.")
+        log.error(f"Error in !latest command: {e}", exc_info=True)
+
+# ---------- Run ----------
+if __name__ == "__main__":
+    if not DISCORD_TOKEN or CHANNEL_ID == 0:
+        log.error("❌ Missing DISCORD_TOKEN or DISCORD_CHANNEL in environment")
+    else:
+        bot.run(DISCORD_TOKEN)
+
+
 
 
 
