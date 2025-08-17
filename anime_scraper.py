@@ -1,139 +1,90 @@
-# anime_scraper.py
 import logging
 import random
 import time
-from urllib.parse import urljoin
-
-import requests
+import json
+import os
 import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 
 log = logging.getLogger("AnimeScraper")
-log.setLevel(logging.INFO)
-
 
 class AnimeScraper:
-    def __init__(self, base_url: str = "https://witanime.red", timeout: int = 12, max_retries: int = 5):
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.max_retries = max_retries
-        # cloudscraper handles most CF pages better than plain requests
-        self.scraper = cloudscraper.create_scraper(browser={"custom": "Mozilla/5.0"})
+    def __init__(self):
+        self.scraper = cloudscraper.create_scraper()
+        self.cache_file = "seen.json"
+        self.seen = self._load_seen()
 
-    # ------------- HTTP helpers -------------
-    def _fetch_cloudscraper(self, url: str) -> str | None:
-        try:
-            log.info("🌐 [Cloudscraper] GET %s", url)
-            r = self.scraper.get(url, timeout=self.timeout)
-            r.raise_for_status()
-            return r.text
-        except Exception as e:
-            log.warning("❌ Cloudscraper failed: %s", e)
-            return None
-
-    def _fetch_allorigins(self, url: str) -> str | None:
-        try:
-            proxy = f"https://api.allorigins.win/raw?url={url}"
-            log.info("🌐 [AllOrigins] GET %s", proxy)
-            r = requests.get(proxy, timeout=self.timeout)
-            r.raise_for_status()
-            return r.text
-        except Exception as e:
-            log.warning("❌ AllOrigins failed: %s", e)
-            return None
-
-    def _get_html(self, url: str) -> str | None:
-        """Try cloudscraper first, then AllOrigins, with retries/backoff."""
-        for attempt in range(1, self.max_retries + 1):
-            html = self._fetch_cloudscraper(url)
-            if not html:
-                html = self._fetch_allorigins(url)
-
-            if html:
-                return html
-
-            if attempt < self.max_retries:
-                wait = random.uniform(2, 5)
-                log.info("⏳ Retry %d/%d in %.1fs", attempt, self.max_retries, wait)
-                time.sleep(wait)
-
-        log.error("🚨 All retries failed for %s", url)
-        return None
-
-    # ------------- Parsing -------------
-    def _abs(self, maybe_url: str | None) -> str | None:
-        if not maybe_url:
-            return None
-        return urljoin(self.base_url + "/", maybe_url)
-
-    def _parse_episode_cards(self, soup: BeautifulSoup, limit: int) -> list[dict]:
-        episodes: list[dict] = []
-
-        # Primary layout (matches the snippet you showed earlier)
-        cards = soup.select(".anime-card-container")
-        if not cards:
-            # Fallback: some themes use different wrappers
-            cards = soup.select(".anime-card, .episodes-card, .post, article")
-
-        for card in cards:
+    def _load_seen(self):
+        """Load seen episodes from JSON file to avoid duplicates."""
+        if os.path.exists(self.cache_file):
             try:
-                # Episode link (must contain /episode/)
-                ep_a = card.select_one(".episodes-card-title h3 a")
-                if not ep_a:
-                    # Fallback: any anchor that links to /episode/
-                    ep_a = card.select_one('a[href*="/episode/"]')
-                if not ep_a:
-                    continue  # skip non-episode cards
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    return set(json.load(f))
+            except Exception:
+                return set()
+        return set()
 
-                ep_link = self._abs(ep_a.get("href"))
-                if not ep_link or "/episode/" not in ep_link:
-                    continue
+    def _save_seen(self):
+        """Save seen episodes back to disk."""
+        with open(self.cache_file, "w", encoding="utf-8") as f:
+            json.dump(list(self.seen), f, ensure_ascii=False, indent=2)
 
-                ep_label = (ep_a.get_text(strip=True) or "Episode").strip()
+    def fetch_episodes(self, retries=5, delay=3):
+        url = "https://witanime.red/episode/"
+        for attempt in range(1, retries + 1):
+            try:
+                log.info(f"🌐 [Cloudscraper] Attempt {attempt}")
+                res = self.scraper.get(url, timeout=15)
+                res.raise_for_status()
 
-                # Anime title
-                title_a = card.select_one(".anime-card-title h3 a") or card.select_one('a[href*="/anime/"]')
-                title = (title_a.get_text(strip=True) if title_a else "").strip() or "Unknown Title"
+                soup = BeautifulSoup(res.text, "html.parser")
+                cards = soup.select(".anime-card-container")
 
-                # Image (poster/thumbnail)
-                img = None
-                img_tag = card.select_one("img")
-                if img_tag and img_tag.get("src"):
-                    img = self._abs(img_tag["src"])
+                episodes = []
+                for card in cards:
+                    try:
+                        ep_tag = card.select_one(".episodes-card-title h3 a")
+                        anime_tag = card.select_one(".anime-card-title h3 a")
+                        img_tag = card.select_one("img")
 
-                episodes.append({
-                    "title": title,
-                    "episode": ep_label,
-                    "link": ep_link,
-                    "image": img,
-                })
+                        ep_link = ep_tag["href"]
+                        ep_title = ep_tag.text.strip()
+                        anime_title = anime_tag.text.strip()
+                        img_url = img_tag["src"] if img_tag else None
 
-                if len(episodes) >= limit:
-                    break
+                        full_title = f"{anime_title} - {ep_title}"
+
+                        # ✅ skip if already seen
+                        if full_title in self.seen:
+                            continue
+
+                        episodes.append({
+                            "anime": anime_title,
+                            "episode": ep_title,
+                            "link": ep_link,
+                            "image": img_url
+                        })
+                        self.seen.add(full_title)
+
+                    except Exception as e:
+                        log.warning(f"⚠️ Failed to parse episode card: {e}")
+
+                if episodes:
+                    self._save_seen()
+                    log.info(f"✅ Parsed {len(episodes)} new episode(s) from /episode/")
+                    return episodes
+                else:
+                    log.warning("⚠️ No new episodes found.")
+                    return []
+
             except Exception as e:
-                log.warning("⚠️ Parse error on a card: %s", e)
-
-        return episodes
-
-    # ------------- Public API -------------
-    def fetch_episodes(self, limit: int = 10) -> list[dict]:
-        """
-        Fetch the newest episodes specifically from /episode/ (not the homepage).
-        Returns a list of dicts: {title, episode, link, image}
-        """
-        url = f"{self.base_url}/episode/"
-        html = self._get_html(url)
-        if not html:
-            log.error("❌ Could not fetch the /episode/ page.")
-            return []
-
-        soup = BeautifulSoup(html, "html.parser")
-        episodes = self._parse_episode_cards(soup, limit=limit)
-
-        # As a safety filter, ensure we only return /episode/ links
-        episodes = [e for e in episodes if "/episode/" in (e.get("link") or "")]
-        log.info("✅ Parsed %d episode(s) from /episode/", len(episodes))
-        return episodes
-
-
+                log.warning(f"❌ Attempt {attempt} failed: {e}")
+                if attempt < retries:
+                    wait = delay + random.uniform(0.5, 2.0)
+                    log.info(f"⏳ Retry {attempt}/{retries} in {wait:.1f}s")
+                    time.sleep(wait)
+                else:
+                    log.error("🚨 All retries failed.")
+                    return []
 
