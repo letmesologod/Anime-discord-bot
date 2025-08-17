@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 
+
 class AnimeScraper:
     BASE_URL = "https://witanime.red/"
 
@@ -18,35 +19,41 @@ class AnimeScraper:
     def get_latest_episodes(self):
         """Scrape latest episodes from witanime.red"""
         episodes = []
-
         try:
             response = requests.get(self.BASE_URL, headers=self.headers, timeout=10)
-            response.raise_for_status()  # raises exception if 403/404/500
+            response.raise_for_status()
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # Adjust this selector depending on the site’s HTML structure
-            # Example: looking for episode cards inside <div class="episodes-card">
-            cards = soup.select("div.episodes-card")  # <-- may need tweaking
+            # Each episode card
+            cards = soup.select("div.anime-card-container")
 
             for card in cards:
-                title_tag = card.select_one("h3 a")
-                image_tag = card.select_one("img")
+                # Episode info
+                ep_tag = card.select_one("div.episodes-card-title h3 a")
+                img_tag = card.select_one("img.img-responsive")
+                anime_tag = card.select_one("div.anime-card-title h3 a")
 
-                if not title_tag or not image_tag:
+                if not ep_tag or not img_tag:
                     continue
 
-                title = title_tag.get_text(strip=True)
-                link = title_tag["href"]
-                image = image_tag.get("src")
+                ep_title = ep_tag.get_text(strip=True)  # e.g. "الحلقة 7"
+                ep_link = ep_tag["href"]
+                ep_image = img_tag.get("src")
+                anime_title = anime_tag.get_text(strip=True) if anime_tag else "Unknown Anime"
 
-                episodes.append({
-                    "title": title,
-                    "link": link,
-                    "image": image,
-                })
+                # Combine anime + episode in title
+                full_title = f"{anime_title} - {ep_title}"
+
+                episodes.append(
+                    {
+                        "title": full_title,
+                        "link": ep_link,
+                        "image": ep_image,
+                    }
+                )
 
         except Exception as e:
-            print(f"[AnimeScraper] Error: {e}")
+            print(f"[AnimeScraper] Error fetching episodes: {e}")
 
         return episodes
